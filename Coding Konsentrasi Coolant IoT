@@ -1,0 +1,186 @@
+/*******************************************************************
+ * SYSTEM MONITORING COOLANT CNC INDONESIA - BLYNK IoT 2.0 & WiFiManager
+ * Board       : ESP32 DOIT & Expansion Board (Direct 3.3V Setup)
+ * Access Point: "Project Magang" (Password: 12345678)
+ * Sensor      : Brix (GPIO 35), pH (GPIO 32), Suhu (GPIO 4)
+ * Aktuator    : LCD 20x4 I2C, LED Hijau(12), Kuning(14), Merah(27), Modul Buzzer(13)
+ *******************************************************************/
+
+// --- IDENTITAS RESMI BLYNK IoT 2.0 ANDA ---
+#define BLYNK_TEMPLATE_ID   "TMPL6rBQDO_m8"
+#define BLYNK_TEMPLATE_NAME "Monitoring Konsentrasi Coolant Mesin CNC"
+#define BLYNK_AUTH_TOKEN    "arLzrDIqti9P6b-5nq_qs20tLjIaTht6"
+
+#define BLYNK_PRINT Serial
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <WiFiManager.h>  // Library Captive Portal Pengaturan Wi-Fi
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+char auth[] = BLYNK_AUTH_TOKEN;
+
+// Definisikan Pin Fisik Komponen ESP32
+const int PIN_BRIX   = 35; 
+const int PIN_PH     = 32; 
+const int PIN_SUHU   = 4; 
+const int PIN_BUZZER = 13; 
+const int LED_HIJAU  = 12; // Cabut kabel pin 12 sebentar jika proses upload terhambat
+const int LED_KUNING = 14;
+const int LED_MERAH  = 27;
+
+// Inisialisasi Perangkat Keras
+OneWire oneWire(PIN_SUHU);
+DallasTemperature sensorSuhu(&oneWire);
+LiquidCrystal_I2C lcd(0x27, 20, 4); 
+
+// --- DATA TETAP HASIL KALIBRASI RIL SENSOR ANDA ---
+const int ADC_BRIX_AIR_JERNIH   = 26;   // Setara 0.0% Brix
+const int ADC_BRIX_SAMPEL       = 78;   // Hasil fine-tuning 5.5% Brix
+const int ADC_PH_BUFFER_686     = 3262; // Uji larutan Buffer pH 6.86
+const int ADC_PH_BUFFER_918     = 2686; // Uji larutan Buffer pH 9.18
+
+// Variabel Data Akhir Desimal
+float nilaiBrix = 0.0;
+float nilaiPH   = 7.0;
+float suhuC     = 0.0;
+
+BlynkTimer timer;
+
+// Fungsi pembacaan sensor berkala yang dipicu oleh Timer
+void bacaDanKirimSensor() {
+  long totalBrix = 0;
+  long totalPH = 0;
+  int jumlahSampel = 40; 
+
+  // Filter Rata-rata Penyaring Noise (Smoothing)
+  for (int i = 0; i < jumlahSampel; i++) {
+    totalBrix += analogRead(PIN_BRIX);
+    totalPH   += analogRead(PIN_PH);
+    delay(2);
+  }
+  int adcBrix = totalBrix / jumlahSampel;
+  int adcPH   = totalPH / jumlahSampel;
+
+  // Kalkulasi Rumus Kalibrasi Brix Terkoreksi (0 - 7% Brix)
+  if (adcBrix < ADC_BRIX_AIR_JERNIH) adcBrix = ADC_BRIX_AIR_JERNIH;
+  nilaiBrix = (float)(adcBrix - ADC_BRIX_AIR_JERNIH) * 7.0 / (ADC_BRIX_SAMPEL - ADC_BRIX_AIR_JERNIH);
+  if (nilaiBrix < 0.0) nilaiBrix = 0.0;
+
+  // Kalkulasi Rumus Kalibrasi pH Murni 2-Titik (pH 6.86 - 9.18)
+  nilaiPH = 6.86 + (float)(adcPH - ADC_PH_BUFFER_686) * (9.18 - 6.86) / (ADC_PH_BUFFER_918 - ADC_PH_BUFFER_686);
+  if (nilaiPH < 0.0)  nilaiPH = 0.0;
+  if (nilaiPH > 14.0) nilaiPH = 14.0;
+
+  // Membaca Sensor Suhu DS18B20
+  sensorSuhu.requestTemperatures();
+  suhuC = sensorSuhu.getTempCByIndex(0);
+
+  // --- LOGIKA INDIKATOR PANEL FISIKMesin CNC (STANDAR PABRIKS) ---
+  if ((nilaiBrix >= 5.0 && nilaiBrix <= 7.0) && (nilaiPH >= 8.5 && nilaiPH <= 9.5) && (suhuC < 35.0 && suhuC != -127.00)) {
+    digitalWrite(LED_HIJAU, HIGH);
+    digitalWrite(LED_KUNING, LOW);
+    digitalWrite(LED_MERAH, LOW);
+    digitalWrite(PIN_BUZZER, LOW); 
+    lcd.setCursor(0, 3); lcd.print("STATUS: IDEAL / AMAN");
+  } 
+  else if ((nilaiBrix >= 4.0 && nilaiBrix <= 8.0) && (nilaiPH >= 8.0 && nilaiPH <= 9.8)) {
+    digitalWrite(LED_HIJAU, LOW);
+    digitalWrite(LED_KUNING, HIGH);
+    digitalWrite(LED_MERAH, LOW);
+    digitalWrite(PIN_BUZZER, LOW); 
+    lcd.setCursor(0, 3); lcd.print("STATUS: BUTUH MAINT ");
+  } 
+  else {
+    digitalWrite(LED_HIJAU, LOW);
+    digitalWrite(LED_KUNING, LOW);
+    digitalWrite(LED_MERAH, HIGH);
+    lcd.setCursor(0, 3); lcd.print("STATUS: DANGER ALARM");
+    
+    // Buzzer Modul bunyi denyut pulsa cepat
+    digitalWrite(PIN_BUZZER, HIGH); delay(100); 
+    digitalWrite(PIN_BUZZER, LOW);
+  }
+
+  // --- TAMPILKAN DATA KE LAYAR LCD 20x4 I2C ---
+  lcd.setCursor(0, 0); lcd.print("Kekentalan: "); lcd.print(nilaiBrix, 1); lcd.print("% Brix ");
+  lcd.setCursor(0, 1); lcd.print("Keasaman  : pH "); lcd.print(nilaiPH, 1); lcd.print("     ");
+  lcd.setCursor(0, 2);
+  if (suhuC == -127.00) {
+    lcd.print("Temperatur: ERR *C  ");
+  } else {
+    lcd.print("Temperatur: "); lcd.print(suhuC, 1); lcd.print((char)223); lcd.print("C    ");
+  }
+
+  // --- TRANSMISI DATA KE SERVER GLOBAL BLYNK IOT NEW (2.0) ---
+  Blynk.virtualWrite(V0, nilaiBrix); 
+  Blynk.virtualWrite(V1, nilaiPH);   
+  Blynk.virtualWrite(V2, suhuC);     
+
+  // Debug Serial Monitor
+  Serial.print("Brix: "); Serial.print(nilaiBrix, 1);
+  Serial.print(" | pH: "); Serial.print(nilaiPH, 1);
+  Serial.print(" | Suhu: "); Serial.println(suhuC, 1);
+}
+
+void setup() {
+  Serial.begin(115200);
+  analogReadResolution(12); 
+
+  // Konfigurasi Kaki Output Panel
+  pinMode(PIN_BUZZER, OUTPUT);
+  pinMode(LED_HIJAU, OUTPUT);
+  pinMode(LED_KUNING, OUTPUT);
+  pinMode(LED_MERAH, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
+
+  // Inisialisasi LCD & Sensor Suhu
+  lcd.init();
+  lcd.backlight();
+  sensorSuhu.begin();
+
+  // Memaksa mode Wi-Fi ESP32 ke Station Mode
+  WiFi.mode(WIFI_STA);
+
+  // Tampilan Proses WiFiManager di Layar LCD
+  lcd.setCursor(0, 0); lcd.print("WiFiManager Active  ");
+  lcd.setCursor(0, 1); lcd.print("Connect to AP:      ");
+  lcd.setCursor(0, 2); lcd.print("SSID: Project Magang");
+  lcd.setCursor(0, 3); lcd.print("Pass: 12345678      ");
+
+  // Inisialisasi Portal Penyelamat Wi-Fi Otomatis (WiFiManager)
+  WiFiManager wm;
+  // wm.resetSettings(); // Buka komentar baris ini sekali saja jika ingin menghapus Wi-Fi lama yang tersimpan
+  bool res = wm.autoConnect("Project Magang", "12345678"); 
+  
+  lcd.clear();
+
+  if (!res) {
+    Serial.println("Gagal mengoneksikan Wi-Fi");
+    lcd.setCursor(0, 1); lcd.print("WiFi Connection FAIL");
+    delay(3000);
+    ESP.restart(); 
+  } else {
+    Serial.println("Wi-Fi Berhasil Terhubung!");
+    lcd.setCursor(0, 1); lcd.print("WiFi Connected ok!  ");
+    lcd.setCursor(0, 2); lcd.print("Connecting Blynk... ");
+    
+    // Konfigurasi koneksi Blynk Cloud Global 2.0 (Tanpa Port 8080)
+    Blynk.config(auth);
+    Blynk.connect();
+    delay(2000);
+    lcd.clear();
+  }
+
+  // Pengiriman berkala ke Cloud diatur setiap 1.5 detik
+  timer.setInterval(1500L, bacaDanKirimSensor);
+}
+
+void loop() {
+  Blynk.run();
+  timer.run();
+}
