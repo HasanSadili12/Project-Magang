@@ -1,0 +1,50 @@
+function doPost(e) {
+  try {
+    // Membaca data kiriman JSON dari ESP32
+    var data = JSON.parse(e.postData.contents);
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    
+    // Waktu otomatis Indonesia (WIB)
+    var sekarang = new Date();
+    var tanggal = Utilities.formatDate(sekarang, "GMT+7", "yyyy-MM-dd");
+    var waktu = Utilities.formatDate(sekarang, "GMT+7", "HH:mm:ss");
+    
+    // Menangkap variabel JSON dari ESP32 dengan sistem Null-Safety
+    var operator   = data.operator ? String(data.operator) : "System";     
+    var volume     = data.volume ? parseFloat(data.volume) : 0.0;
+    var persen     = data.persen ? parseFloat(data.persen) : 0.0;
+    var keterangan = data.keterangan ? String(data.keterangan) : "Log Berkala"; 
+    var statusEmail = "Aman";
+    
+    // Logika Kirim Email jika Persentase Kritis (<= 25%)
+    if (persen <= 25.0) {
+      statusEmail = "TERKIRIM (KRITIS!)";
+      kirimNotifikasiEmail(volume, persen);
+    }
+    
+    // Menyisipkan baris baru kosong tepat di bawah baris judul (Baris 2)
+    sheet.insertRowBefore(2);
+    
+    // Mengisi data ke baris 2 yang baru saja dibuat (Kolom A sampai G)
+    sheet.getRange(2, 1, 1, 7).setValues([[tanggal, waktu, operator, volume, persen, keterangan, statusEmail]]);
+    
+    // Respons sukses balik ke ESP32
+   return ContentService.createTextOutput("SUCCESS");
+    
+  } catch(error) {
+    return ContentService.createTextOutput(JSON.stringify({"status":"error", "message": error.toString()})).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function kirimNotifikasiEmail(volumeSekarang, persenSekarang) {
+  var emailTujuan = "hasansadili1201@gmail.com, toolmanp1@meiwa-m.co.id, guruh@meiwa-m.co.id"; 
+  var subjek = "[ALARM GUDANG] Stok OIL SLIDE WAY 68 Kritis (<= 25%)";
+  var pesan = "Yth. Tim Logistik & Gudang,\n\n" +
+              "Oli Pelumas Slide way 68 di dalam drum penampungan telah menyentuh batas kritis.\n\n" +
+              "Sisa Kapasitas : " + persenSekarang.toFixed(1) + " %\n" +
+              "Sisa Volume     : " + volumeSekarang.toFixed(1) + " Liter\n\n" +
+              "Mohon segera lakukan pergantian drum baru.\nTerima kasih.\n" +
+              "Sistem Monitoring Project Magang.\n";
+              
+  MailApp.sendEmail(emailTujuan, subjek, pesan);
+}
