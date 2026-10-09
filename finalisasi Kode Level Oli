@@ -1,0 +1,376 @@
+// KODING PENGETESAN HASAN SADILI - REVISI TOTAL TEROPTIMASI
+#define BLYNK_TEMPLATE_ID   "TMPL61I3wXU-g"
+#define BLYNK_TEMPLATE_NAME "Monitoring Gudang Oli"
+#define BLYNK_AUTH_TOKEN    "oX9GxmH9Lp77h-4vmvftsJlbkRTfMedt"
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <Wire.h> 
+#include <LiquidCrystal_I2C.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+// Inisialisasi LCD 20x4 I2C (Alamat default 0x27)
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+// URL PORTAL WEB APP GOOGLE SHEETS
+const char* googleWebAppUrl = "https://script.google.com/macros/s/AKfycbywRo1wCSImbL5eDVREBQtUiIdgEZMg36G9tWMoC1z4ufOjnmCsF1LigHWZAkkVHR8/exec";
+
+// ====================================================================
+// SETTING WI-FI PABRIK / MEJA KERJA
+// ====================================================================
+const char* ssidGudang = "Meiwa Mesh"; 
+const char* passGudang = "&m31WA$ip"; 
+
+// KONFIGURASI PIN RFID RC522 (SPI)
+#define SS_PIN       5
+#define RST_PIN      4   
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+// KONFIGURASI PIN HARDWARE INDIKATOR
+#define PIN_SENSOR   34 
+#define LED_HIJAU    25 
+#define LED_MERAH    26 
+#define PIN_BUZZER   27 
+
+// DATA KALIBRASI RIIL
+const int ADC_KOSONG  = 430;   
+const int ADC_PENUH   = 2882;  
+
+// SPESIFIKASI FISIK DRUM
+const float TINGGI_MAKS = 90.0;     
+const float KAPASITAS_MAKS = 200.0; 
+
+// CONFIG IP STATIS
+IPAddress local_IP(192, 168, 0, 69);   
+IPAddress gateway(192, 168, 1, 254);   
+IPAddress subnet(255, 255, 252, 0);    
+IPAddress primaryDNS(192, 168, 1, 1);  
+IPAddress secondaryDNS(8, 8, 8, 8);    
+
+// Waktu Asinkronus
+unsigned long waktuTerakhirBacaSensor = 0;
+const unsigned long INTERVAL_BACA_SENSOR = 2000; // Update LCD tiap 1 detik
+
+unsigned long waktuTerakhirLogJam = 0;
+const unsigned long INTERVAL_LOG_GOOGLE = 3600000; // Log standby 1 jam sekali
+
+unsigned long waktuTerakhirCobaKonekWiFi = 0;
+const unsigned long INTERVAL_COBA_WIFI = 15000; 
+
+float volumeAwalSesi = 0.0;
+bool sesiAktif = false;
+unsigned long waktuSesiMulai = 0;
+const unsigned long TIMEOUT_SESI = 20000; 
+
+bool statusOnlineLama = false;
+
+// REGISTER KARTU RFID
+String kartuOperator1 = "90 12 0D 55"; // Bpk. Riduwan
+String kartuOperator2 = "00 DF 98 53"; // Bpk. Andi R
+String namaOperatorAktif = "Anonim";
+
+// ====================================================================
+// FUNGSI HELPER: URL ENCODE (Mencegah Error 400 karena spasi/karakter khusus)
+// ====================================================================
+String urlEncode(String str) {
+  String encodedString = "";
+  char c;
+  for (int i = 0; i < str.length(); i++) {
+    c = str.charAt(i);
+    if (isalnum(c)) {
+      encodedString += c;
+    } else if (c == ' ') {
+      encodedString += "%20";
+    } else {
+      char code1 = (c & 0xf) + '0';
+      if ((c & 0xf) > 9) code1 = (c & 0xf) - 10 + 'A';
+      c = (c >> 4) & 0xf;
+      char code2 = c + '0';
+      if (c > 9) code2 = c - 10 + 'A';
+      encodedString += '%';
+      encodedString += code2;
+      encodedString += code1;
+    }
+  }
+  return encodedString;
+}
+
+// ====================================================================
+// FUNGSI UTAMA PENGIRIMAN DATA KE GOOGLE SHEETS (VIA HTTP GET)
+// ====================================================================
+void kirimDataKeGoogleSheet(float volume, float persen, String namaOp, String statusStok) {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client; 
+    client.setInsecure();    
+    client.setTimeout(10000); 
+    
+    HTTPClient http;
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    
+    String safeNamaOp = urlEncode(namaOp);
+    String safeStatusStok = urlEncode(statusStok);
+
+    // Membentuk URL Parameter GET yang aman
+    String url = String(googleWebAppUrl) + 
+                 "?operator=" + safeNamaOp +
+                 "&volume=" + String(volume, 1) +
+                 "&persen=" + String(persen, 1) +
+                 "&keterangan=" + safeStatusStok;
+
+    Serial.println("\n--- MENGIRIM DATA KE GOOGLE SHEETS ---");
+    Serial.println("URL: " + url);
+
+    if (http.begin(client, url)) {
+      int httpResponseCode = http.GET();
+      
+      Serial.print("HTTP Response Code Google: ");
+      Serial.println(httpResponseCode); 
+      
+      if (httpResponseCode == 200) {
+        Serial.println("-> BERHASIL! Data Masuk ke Google Sheets.");
+      } else if (httpResponseCode > 0) {
+        String response = http.getString();
+        Serial.printf("-> Google Merespons Code %d: %s\n", httpResponseCode, response.c_str());
+      } else {
+        Serial.printf("-> Gagal Koneksi/SSL Error: %s\n", http.errorToString(httpResponseCode).c_str());
+      }
+      
+      http.end();
+    } else {
+      Serial.println("-> Gagal Inisialisasi HTTP Client!");
+    }
+  } else {
+    Serial.println("-> Pengiriman Dibatalkan: WiFi Offline!");
+  }
+}
+
+float volumeFilterLama = 1.0;
+
+void sendSensorData() {
+  long totalADC = 0;
+  for (int i = 0; i < 150; i++) {
+    totalADC += analogRead(PIN_SENSOR);
+    delayMicroseconds(2); 
+  }
+  float rataADC = totalADC / 150.0;
+
+  float tinggiMinyak = 0.0 + (rataADC - ADC_KOSONG) * (TINGGI_MAKS - 0.0) / (ADC_PENUH - ADC_KOSONG);
+  if (tinggiMinyak < 0) tinggiMinyak = 0;
+  if (tinggiMinyak > TINGGI_MAKS) tinggiMinyak = TINGGI_MAKS;
+
+  float volumeLiterFloat = (tinggiMinyak / TINGGI_MAKS) * KAPASITAS_MAKS;
+  if (volumeFilterLama<0){
+    volumeFilterLama = volumeLiterFloat;
+  }
+  volumeLiterFloat = (volumeFilterLama * 0.95) + (volumeLiterFloat * 0.05);
+  volumeFilterLama = volumeLiterFloat;
+
+  float persentase = (volumeLiterFloat / KAPASITAS_MAKS) * 100.0;
+
+  if (volumeLiterFloat >= 196.0) {
+    volumeLiterFloat = 200.0;
+    persentase = 100.0;
+  }
+
+  // Update LCD
+  lcd.setCursor(0, 1);
+  lcd.print("   Volume : "); lcd.print(volumeLiterFloat, 1); lcd.print(" Ltr   ");
+  lcd.setCursor(0, 2);
+  lcd.print("Persen : "); lcd.print(persentase, 1); lcd.print(" %       ");
+
+  if (!sesiAktif) {
+    lcd.setCursor(0, 3);
+    if (WiFi.status() == WL_CONNECTED) {
+      lcd.print("TAP KARTU AMBIL OLI ");
+    } else {
+      lcd.print("TAP KARTU (OFFLINE) ");
+    }
+    
+    if (persentase <= 25.0) {
+      digitalWrite(LED_HIJAU, LOW);
+      digitalWrite(LED_MERAH, HIGH);
+    } else {
+      digitalWrite(LED_HIJAU, HIGH);
+      digitalWrite(LED_MERAH, LOW);
+    }
+
+    // Kirim data ke aplikasi HP hanya jika Wi-Fi dan Server Blynk terkoneksi murni
+    if (WiFi.status() == WL_CONNECTED && Blynk.connected()) {
+      Blynk.virtualWrite(V1, volumeLiterFloat);
+    }
+    // Log Berkala 1 Jam Sekali saat Standby
+    if (millis() - waktuTerakhirLogJam >= INTERVAL_LOG_GOOGLE || waktuTerakhirLogJam == 0) {
+      kirimDataKeGoogleSheet(volumeLiterFloat, persentase, "System", "Log Berkala Per Jam");
+      waktuTerakhirLogJam = millis(); 
+    }
+
+  } else {
+    lcd.setCursor(0, 3);
+    lcd.print(namaOperatorAktif.substring(0, 10) + " AMBIL OLI");
+
+    float jumlahDiambil = volumeAwalSesi - volumeLiterFloat;
+    if (jumlahDiambil < 0) jumlahDiambil = 0;
+
+    // ====================================================================
+    // PERBAIKAN LOGIKA: SEGERA GANTI BAGIAN TIMEOUT_SESI INI DI ARDUINO IDE
+    // ====================================================================
+    if (millis() - waktuSesiMulai > TIMEOUT_SESI) {
+      sesiAktif = false;
+      
+      // 1. Menghitung selisih murni (bisa positif/negatif)
+      float selisihVolume = volumeAwalSesi - volumeLiterFloat; 
+      
+      // 2. Menggunakan fungsi abs() agar nilai minus saat isi oli berubah jadi positif murni
+      float jumlahPerubahan = abs(selisihVolume); 
+      
+      // 3. Menentukan keterangan teks otomatis apakah oli "Mengambil" atau "Refill/Masuk"
+      String teksKeterangan = "";
+      if (selisihVolume > 0.5) {
+        teksKeterangan = "Mengambil " + String(jumlahPerubahan, 1) + " L";
+      } else if (selisihVolume < -0.5) {
+        teksKeterangan = "Refill / Stok Masuk " + String(jumlahPerubahan, 1) + " L";
+      } else {
+        teksKeterangan = "Sesi Standby / No Action";
+      }
+      
+      // 4. Kirim data ke Google Sheets jika ada perubahan minimal 0.5 Liter (Sangat Akurat)
+      if (jumlahPerubahan >= 0.5) {
+        kirimDataKeGoogleSheet(volumeLiterFloat, persentase, namaOperatorAktif, teksKeterangan);
+        waktuTerakhirLogJam = millis(); // Reset timer berkala 1 jam
+      }
+      
+      lcd.setCursor(0, 3);
+      lcd.print("SESI DIKUNCI KEMBALI");
+      digitalWrite(PIN_BUZZER, HIGH); delay(500); digitalWrite(PIN_BUZZER, LOW);
+      delay(1500);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("MONITOR OLI SLIDE 68");
+    }
+  }
+}
+
+void cekRfidCard() {
+  if (!sesiAktif) {
+    if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+      String uidString = "";
+      for (byte i = 0; i < mfrc522.uid.size; i++) {
+        uidString += String(mfrc522.uid.uidByte[i] < 0x10 ? "0" : "");
+        uidString += String(mfrc522.uid.uidByte[i], HEX);
+        if (i < mfrc522.uid.size - 1) uidString += " ";
+      }
+      uidString.toUpperCase();
+
+      Serial.print("Kartu Terdeteksi UID: ");
+      Serial.println(uidString);
+
+      if (uidString == kartuOperator1) {
+        namaOperatorAktif = "Bpk. Riduwan";
+        sesiAktif = true;
+      } else if (uidString == kartuOperator2) {
+        namaOperatorAktif = "Bpk. Andi R";
+        sesiAktif = true;
+      } else {
+        lcd.setCursor(0, 3);
+        lcd.print("ID BARU: " + uidString.substring(0,11));
+        digitalWrite(PIN_BUZZER, HIGH); delay(500); digitalWrite(PIN_BUZZER, LOW);
+        delay(1000);
+      }
+
+      if (sesiAktif) {
+        long totalADC = 0;
+        for (int i = 0; i < 10; i++) totalADC += analogRead(PIN_SENSOR);
+        float rataADC = totalADC / 10.0;
+        float tinggiMinyak = 0.0 + (rataADC - ADC_KOSONG) * (TINGGI_MAKS - 0.0) / (ADC_PENUH - ADC_KOSONG);
+        volumeAwalSesi = (tinggiMinyak / TINGGI_MAKS) * KAPASITAS_MAKS;
+        
+        waktuSesiMulai = millis();
+        digitalWrite(PIN_BUZZER, HIGH); delay(80); digitalWrite(PIN_BUZZER, LOW); delay(80);
+        digitalWrite(PIN_BUZZER, HIGH); delay(80); digitalWrite(PIN_BUZZER, LOW);
+      }
+      mfrc522.PICC_HaltA();
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000); 
+
+  SPI.begin();         
+  mfrc522.PCD_Init();  
+  
+  pinMode(PIN_SENSOR, INPUT);
+  pinMode(LED_HIJAU, OUTPUT);
+  pinMode(LED_MERAH, OUTPUT);
+  pinMode(PIN_BUZZER, OUTPUT);
+  analogReadResolution(12); 
+  
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("MONITOR OLI SLIDE 68");
+
+  if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
+    Serial.println("STA Failed to configure");
+  }
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true); 
+  WiFi.begin(ssidGudang, passGudang);
+  
+  Serial.print("Connecting to Wi-Fi");
+  int count = 0;
+  while (WiFi.status() != WL_CONNECTED && count < 20) {
+    delay(500);
+    Serial.print(".");
+    count++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nConnected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nWiFi Connection Timeout - Masuk Mode Standby");
+  }
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  sendSensorData(); 
+}
+
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!statusOnlineLama) {
+      Serial.print("Wi-Fi Terhubung! IP: ");
+      Serial.println(WiFi.localIP()); 
+      Blynk.connect();
+      statusOnlineLama = true;
+    }
+    if (Blynk.connected()){
+      Blynk.run();
+    
+    }
+  } 
+  else {
+    if (statusOnlineLama) {
+      Serial.println("Koneksi Putus. Mode Standby Aktif.");
+      statusOnlineLama = false;
+    }
+    
+    if (millis() - waktuTerakhirCobaKonekWiFi >= INTERVAL_COBA_WIFI) {
+      WiFi.begin(ssidGudang, passGudang); 
+      waktuTerakhirCobaKonekWiFi = millis();
+    }
+  }
+
+  cekRfidCard();
+
+  if (millis() - waktuTerakhirBacaSensor >= INTERVAL_BACA_SENSOR || sesiAktif) {
+    sendSensorData();
+    waktuTerakhirBacaSensor = millis();
+  }
+}
