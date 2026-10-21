@@ -1,0 +1,88 @@
+// ====================================================================
+// FUNGSI UTAMA (MEMPROSES METHOD GET DARI ESP32 PERBAIKAN SEBELUMNYA)
+// ====================================================================
+function doGet(e) {
+  return prosesDataKirim(e.parameter);
+}
+
+// ====================================================================
+// FUNGSI DUKUNGAN (MEMPROSES METHOD POST BILA SUATU SAAT DIPAKAI)
+// ====================================================================
+function doPost(e) {
+  try {
+    if (!e || !e.postData || !e.postData.contents) {
+      return ContentService.createTextOutput("ERROR: No post data received");
+    }
+    var dataJson = JSON.parse(e.postData.contents);
+    return prosesDataKirim(dataJson);
+  } catch (error) {
+    return ContentService.createTextOutput("ERROR: " + error.toString());
+  }
+}
+
+// ====================================================================
+// FUNGSI INTI PENGOLAHAN DATA, SHEET LOGGING & EMAIL NOTIFIKASI
+// ====================================================================
+function prosesDataKirim(data) {
+  var lock = LockService.getScriptLock();
+  // Kunci akses max 10 detik agar data tidak tabrakan/patah saat dikirim bersamaan
+  lock.tryLock(10000);
+
+  try {
+    if (!data) {
+      return ContentService.createTextOutput("ERROR: No data received");
+    }
+
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    
+    // Waktu otomatis Indonesia (WIB - Asia/Jakarta)
+    var sekarang = new Date();
+    var tanggal  = Utilities.formatDate(sekarang, "Asia/Jakarta", "yyyy-MM-dd");
+    var waktu    = Utilities.formatDate(sekarang, "Asia/Jakarta", "HH:mm:ss");
+    
+    // Menangkap data dengan validasi null-safety & tipe data presisi
+    var operator   = (data.operator !== undefined && data.operator !== null && data.operator !== "") ? String(data.operator) : "System";    
+    var volume     = (data.volume !== undefined && data.volume !== null) ? parseFloat(data.volume) : 0.0;
+    var persen     = (data.persen !== undefined && data.persen !== null) ? parseFloat(data.persen) : 0.0;
+    var keterangan = (data.keterangan !== undefined && data.keterangan !== null && data.keterangan !== "") ? String(data.keterangan) : "Log Berkala"; 
+    
+    var statusEmail = "Aman";
+    
+    // Logika Kirim Email jika Persentase Kritis (<= 50%)
+    if (persen <= 50.0) {
+      statusEmail = "TERKIRIM (KRITIS!)";
+      kirimNotifikasiEmail(volume, persen);
+    }
+    
+    // Simpan data ke baris paling atas Google Sheets
+    sheet.insertRowBefore(2);
+    sheet.getRange(2,1,1,7).setValues([[tanggal, waktu, operator, volume, persen, keterangan, statusEmail]]);
+    
+    // Respon sukses kembali ke ESP32
+    return ContentService.createTextOutput("SUCCESS");
+    
+  } catch (error) {
+    return ContentService.createTextOutput("ERROR: " + error.toString());
+  } finally {
+    lock.releaseLock(); // Melepas kunci proses
+  }
+}
+
+// ====================================================================
+// FUNGSI KIRIM NOTIFIKASI EMAIL
+// ====================================================================
+function kirimNotifikasiEmail(volumeSekarang, persenSekarang) {
+  try {
+    var emailTujuan = "hasansadili1201@gmail.com, toolmanp1@meiwa-m.co.id, guruh@meiwa-m.co.id"; 
+    var subjek = "[ALARM GUDANG] Stok Oil Slide way 68 Kritis (<= 50%)";
+    var pesan = "Yth. Tim Logistik & Gudang,\n\n" +
+                "Oli pelumas Slide way 68 di dalam drum penampungan telah menyentuh batas kritis.\n\n" +
+                "Sisa Kapasitas : " + persenSekarang.toFixed(1) + " %\n" +
+                "Sisa Volume    : " + volumeSekarang.toFixed(1) + " Liter\n\n" +
+                "Mohon segera lakukan pergantian drum baru.\nTerima kasih.\nSistem Monitoring Project Magang Jaja Ganteng dan imut :).";
+                
+    MailApp.sendEmail(emailTujuan, subjek, pesan);
+  } catch (err) {
+    Logger.log("Gagal kirim email: " + err.toString());
+  }
+}
