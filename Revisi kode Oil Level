@@ -14,7 +14,7 @@
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
-const char* googleWebAppUrl = "https://script.google.com/macros/s/AKfycbywRo1wCSImbL5eDVREBQtUiIdgEZMg36G9tWMoC1z4ufOjnmCsF1LigHWZAkkVHR8/exec";
+const char* googleWebAppUrl = "https://script.google.com/macros/s/AKfycbyZiNqzBgN8UXZjwf163UO2g3VKn5P1Dp8WpXosQcHFnpQrH4GSzO5gzRh1G0c0idJC3Q/exec";
 
 // ====================================================================
 // SETTING WI-FI PABRIK / MEJA KERJA
