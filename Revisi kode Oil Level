@@ -1,4 +1,4 @@
-// KODING PENGETESAN HASAN SADILI - REVISI TOTAL UTUH PART 1
+// KODING PENGETESAN HASAN SADILI - REVISI TOTAL UTUH
 #define BLYNK_TEMPLATE_ID   "TMPL61I3wXU-g"
 #define BLYNK_TEMPLATE_NAME "Monitoring Gudang Oli"
 #define BLYNK_AUTH_TOKEN    "oX9GxmH9Lp77h-4vmvftsJlbkRTfMedt"
@@ -71,8 +71,11 @@ unsigned long waktuMulaiDrop0 = 0;
 const unsigned long DURASI_VALIDASI_0 = 10000; 
 bool statusTerdeteksi0 = false;         
 
+// ====================================================================
+// BUZZER KRITIS (JEDA 30 MENIT)
+// ====================================================================
 unsigned long waktuTerakhirBuzzerKritis = 0;
-bool statusBuzzerKritis = false;
+const unsigned long INTERVAL_BUZZER_KRITIS = 1800000; // 30 Menit (30 * 60 * 1000 ms)
 
 String urlEncode(String str) {
   String encodedString = "";
@@ -125,7 +128,6 @@ void kirimDataKeGoogleSheet(float volume, float persen, String namaOp, String st
   }
 }
 
-
 void sendSensorData() {
   long totalADC = 0;
   for (int i = 0; i < 150; i++) {
@@ -169,21 +171,23 @@ void sendSensorData() {
       lcd.print("TAP KARTU (OFFLINE) ");
     }
     
-    // KONTROL LED & BUZZER PUTUS-NYAMBUNG 0.5 DETIK
+    // KONTROL LED & BUZZER KRITIS (BUNYI SETIAP 30 MENIT)
     if (persentase <= 50.0) {
       digitalWrite(LED_HIJAU, LOW);
       digitalWrite(LED_MERAH, HIGH);
 
-      if (millis() - waktuTerakhirBuzzerKritis >= 1000) { 
-        statusBuzzerKritis = !statusBuzzerKritis;
-        digitalWrite(PIN_BUZZER, statusBuzzerKritis ? HIGH : LOW);
+      // Pemicu buzzer berbunyi selama 1 detik setiap interval 30 menit
+      if (millis() - waktuTerakhirBuzzerKritis >= INTERVAL_BUZZER_KRITIS || waktuTerakhirBuzzerKritis == 0) { 
+        digitalWrite(PIN_BUZZER, HIGH);
+        delay(1000); // Buzzer berbunyi 1 detik sebagai peringatan
+        digitalWrite(PIN_BUZZER, LOW);
         waktuTerakhirBuzzerKritis = millis();
       }
     } else {
       digitalWrite(LED_HIJAU, HIGH);
       digitalWrite(LED_MERAH, LOW);
       digitalWrite(PIN_BUZZER, LOW); 
-      statusBuzzerKritis = false;
+      waktuTerakhirBuzzerKritis = 0; // Reset agar saat masuk kondisi kritis langsung bunyi pertama kali
     }
 
     if (WiFi.status() == WL_CONNECTED && Blynk.connected()) {
