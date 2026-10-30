@@ -55,7 +55,7 @@ const unsigned long INTERVAL_COBA_WIFI = 15000;
 float volumeAwalSesi = 0.0;
 bool sesiAktif = false;
 unsigned long waktuSesiMulai = 0;
-const unsigned long TIMEOUT_SESI = 20000; 
+const unsigned long TIMEOUT_SESI = 60000; 
 
 bool statusOnlineLama = false;
 
