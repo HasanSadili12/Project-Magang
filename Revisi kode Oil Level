@@ -1,5 +1,5 @@
 // KODING PENGETESAN HASAN SADILI - REVISI TOTAL UTUH
-#define BLYNK_TEMPLATE_ID   "TMPL61I3wXU-g"
+#define BLYNK_TEMPLATE_ID    "TMPL61I3wXU-g"
 #define BLYNK_TEMPLATE_NAME "Monitoring Gudang Oli"
 #define BLYNK_AUTH_TOKEN    "oX9GxmH9Lp77h-4vmvftsJlbkRTfMedt"
 
@@ -51,6 +51,12 @@ const unsigned long INTERVAL_LOG_GOOGLE = 3600000;
 
 unsigned long waktuTerakhirCobaKonekWiFi = 0;
 const unsigned long INTERVAL_COBA_WIFI = 15000; 
+
+// ====================================================================
+// TIMER KHUSUS HEMAT KUOTA BLYNK GRATIS (30 MENIT)
+// ====================================================================
+unsigned long waktuTerakhirKirimBlynk = 0;
+const unsigned long INTERVAL_LOG_BLYNK = 1800000; // 30 Menit (30 * 60 * 1000 ms)
 
 float volumeAwalSesi = 0.0;
 bool sesiAktif = false;
@@ -161,7 +167,7 @@ void sendSensorData() {
   lcd.setCursor(0, 1);
   lcd.print("   Volume : "); lcd.print(volumeLiterFloat, 1); lcd.print(" Ltr   ");
   lcd.setCursor(0, 2);
-  lcd.print("Persen : "); lcd.print(persentase, 1); lcd.print(" %       ");
+  lcd.print("Persen : "); lcd.print(persentase, 1); lcd.print(" %        ");
 
   if (!sesiAktif) {
     lcd.setCursor(0, 3);
@@ -190,8 +196,15 @@ void sendSensorData() {
       waktuTerakhirBuzzerKritis = 0; // Reset agar saat masuk kondisi kritis langsung bunyi pertama kali
     }
 
+    // ====================================================================
+    // LOGIKA HEMAT KUOTA BLYNK: KIRIM JEDA PER 30 MENIT
+    // ====================================================================
     if (WiFi.status() == WL_CONNECTED && Blynk.connected()) {
-      Blynk.virtualWrite(V1, volumeLiterFloat);
+      if (millis() - waktuTerakhirKirimBlynk >= INTERVAL_LOG_BLYNK || waktuTerakhirKirimBlynk == 0) {
+        Blynk.virtualWrite(V1, volumeLiterFloat);
+        waktuTerakhirKirimBlynk = millis();
+        Serial.println("[BLYNK] Data berhasil dikirim (Interval 30 Menit)");
+      }
     }
 
     // DELAY FILTER ANTI ALARM PALSU 0% SELAMA 10 DETIK
@@ -223,6 +236,11 @@ void sendSensorData() {
   } else {
     lcd.setCursor(0, 3);
     lcd.print(namaOperatorAktif.substring(0, 10) + " AMBIL OLI");
+
+    // Tetap kirim ke Blynk saat sesi aktif (operator ambil oli) agar memantau pergerakan oli
+    if (WiFi.status() == WL_CONNECTED && Blynk.connected()) {
+      Blynk.virtualWrite(V1, volumeLiterFloat);
+    }
 
     float jumlahDiambil = volumeAwalSesi - volumeLiterFloat;
     if (jumlahDiambil < 0) jumlahDiambil = 0;
@@ -297,8 +315,8 @@ void setup() {
   Serial.begin(115200);
   delay(1000); 
 
-  SPI.begin();         
-  mfrc522.PCD_Init();  
+  SPI.begin();          
+  mfrc522.PCD_Init();   
   
   pinMode(PIN_SENSOR, INPUT);
   pinMode(LED_HIJAU, OUTPUT);
